@@ -41,13 +41,36 @@ def format_update(
 	if not new_tables_log:
 		return None
 
-	# Per-table lines
+	# Symbol definitions for footnotes
+	SYMBOL_NO_DATA = "△"     # No ELO data from BGA
+	SYMBOL_FLOOR = "▽"       # Loss absorbed at ELO floor (100)
+	SYMBOL_CEILING = "◇"    # Gain absorbed at ELO ceiling (1000)
+
+	# Per-table lines (skip friendly and abandoned games)
 	table_lines = []
+	used_symbols = set()
 	for table_data, elo_log in new_tables_log:
+		# Skip friendly/unranked games
+		if str(table_data.get("unranked", "0")) == "1":
+			continue
+		# Skip abandoned/abnormal-end games
+		if str(table_data.get("normalend", "1")) == "0":
+			continue
+
 		game_name = table_data.get("game_name", "Unknown")
 		parts = []
-		for name, delta in elo_log.items():
-			parts.append(f"{name} {delta:+.1f}")
+		for name, (delta, flags) in elo_log.items():
+			suffix = ""
+			if "no_data" in flags:
+				suffix = SYMBOL_NO_DATA
+				used_symbols.add("no_data")
+			elif "floor" in flags:
+				suffix = SYMBOL_FLOOR
+				used_symbols.add("floor")
+			elif "ceiling" in flags:
+				suffix = SYMBOL_CEILING
+				used_symbols.add("ceiling")
+			parts.append(f"{name} {delta:+.1f}{suffix}")
 		if parts:
 			table_lines.append(f"**{game_name}**: {', '.join(parts)}")
 		else:
@@ -68,11 +91,25 @@ def format_update(
 		elif diff < -0.5:
 			elo_lines.append(f"{name}: {old_elo:.1f} → {new_elo:.1f} (↓{abs(diff):.1f})")
 
-	desc = f"**New Tables ({len(new_tables_log)}):**\n"
+	if not table_lines:
+		return None
+
+	desc = f"**New Tables ({len(table_lines)}):**\n"
 	desc += "\n".join(table_lines)
 	if elo_lines:
 		desc += "\n\n**ELO Changes:**\n"
 		desc += "\n".join(elo_lines)
+
+	# Add footnotes for any symbols used
+	if used_symbols:
+		footnotes = []
+		if "no_data" in used_symbols:
+			footnotes.append(f"{SYMBOL_NO_DATA} Player's BGA ELO for this game is ≤ 100 (no loss penalty)")
+		if "floor" in used_symbols:
+			footnotes.append(f"{SYMBOL_FLOOR} At custom ELO floor (100) — loss absorbed")
+		if "ceiling" in used_symbols:
+			footnotes.append(f"{SYMBOL_CEILING} Near custom ELO ceiling (1000) — gain diminished")
+		desc += "\n\n" + "\n".join(footnotes)
 
 	return {
 		"title": "Weekly Update",

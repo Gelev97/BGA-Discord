@@ -140,14 +140,28 @@ def process_table(db, table_data, game_metadata, user_names, cooperative_games):
 			old_elo = ps["custom_elo"]
 			ps["custom_elo"] = apply_score_change(old_elo, raw_change, weight)
 			delta = ps["custom_elo"] - old_elo
-			if abs(delta) > 0.01:
-				elo_log[name] = delta
+
+			# Determine reason flags for ~0 changes
+			flags = set()
+			if abs(delta) < 0.05:
+				if raw_change == 0 and not won:
+					# Loser but BGA ELO for this game is ≤ 100
+					flags.add("no_data")
+				elif old_elo <= 100.0 and raw_change < 0:
+					flags.add("floor")
+				elif old_elo >= 900.0 and raw_change > 0:
+					flags.add("ceiling")
+				# Won with raw_change == 0 means opponent too weak — real +0.0, no flag
+			elo_log[name] = (delta, flags)
 
 	return elo_log
 
 
-def run(first_time: bool = False) -> None:
-	"""Main entry point."""
+DEBUG_DATABASE_FILE = "data/bga_games_database_debug.json"
+
+
+def run(first_time: bool = False, debug: bool = False) -> None:
+	"""Main entry point. If debug=True, uses a copy of the database and only prints."""
 	username = os.environ.get("BGA_USERNAME")
 	password = os.environ.get("BGA_PASSWORD")
 	webhook = os.environ.get("DISCORD_WEBHOOK")
@@ -161,7 +175,17 @@ def run(first_time: bool = False) -> None:
 		print("Failed to login to BGA")
 		return
 
-	db = load_database(DATABASE_FILE)
+	# In debug mode, copy the database and work on the copy
+	db_file = DEBUG_DATABASE_FILE if debug else DATABASE_FILE
+	if debug:
+		import shutil
+		if os.path.exists(DATABASE_FILE):
+			shutil.copy2(DATABASE_FILE, DEBUG_DATABASE_FILE)
+			print(f"Debug mode: copied database to {DEBUG_DATABASE_FILE}")
+		else:
+			print(f"Debug mode: no existing database, starting fresh")
+
+	db = load_database(db_file)
 	previous_elos = dict(db.get("previous_elos", {}))
 	cooperative_games = set(db.get("cooperative_games", []))
 	game_metadata: Dict[str, Any] = {}  # fetched fresh each run
@@ -253,6 +277,7 @@ def run(first_time: bool = False) -> None:
 						"normalend": raw.get("normalend", "1"),
 						"concede": raw.get("concede", "0"),
 						"ranking_disabled": raw.get("ranking_disabled", "0"),
+						"end": int(raw.get("end", 0) or 0),
 						"players": players_data,
 					}
 
@@ -285,11 +310,12 @@ def run(first_time: bool = False) -> None:
 
 			time.sleep(0.3)
 
-	# Process all pending tables
+	# Process all pending tables (sorted chronologically by end time)
 	pending_tables = db.pop("_pending_tables", {})
 	print(f"\nNew tables to process: {len(pending_tables)}")
 
-	for table_id, table_data in pending_tables.items():
+	sorted_tables = sorted(pending_tables.items(), key=lambda x: x[1].get("end", 0))
+	for table_id, table_data in sorted_tables:
 		elo_log = process_table(db, table_data, game_metadata, user_names, cooperative_games)
 		if elo_log is not None:
 			new_tables_log.append((table_data, elo_log))
@@ -327,7 +353,11 @@ def run(first_time: bool = False) -> None:
 	embeds.append(format_leaderboard(player_display, previous_elos))
 	embeds.extend(format_game_details(db["game_stats"]))
 
-	if webhook:
+	if debug:
+		# Debug mode: only print, never send to Discord
+		for embed in embeds:
+			print_embed(embed)
+	elif webhook:
 		for embed in embeds:
 			send_embed(webhook, embed)
 	else:
@@ -346,8 +376,8 @@ def run(first_time: bool = False) -> None:
 		"previous_elos": db["previous_elos"],
 		"last_update": db["last_update"],
 	}
-	save_database(DATABASE_FILE, save_data)
-	print("Database saved.")
+	save_database(db_file, save_data)
+	print(f"Database saved to {db_file}.")
 
 	if client.logout():
 		print("Logged out from BGA.")
@@ -356,4 +386,7 @@ def run(first_time: bool = False) -> None:
 
 
 if __name__ == "__main__":
-	run(first_time=False)
+	import sys
+	debug_mode = "--debug" in sys.argv
+	first_time_mode = "--first-time" in sys.argv
+	run(first_time=first_time_mode, debug=debug_mode)
